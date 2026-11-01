@@ -24,42 +24,38 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       # 1. Checkout Repository
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 2. Setup JDK
+      # 2. Setup Java
       - name: Setup JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      # 3. Setup Android SDK Environment
-      # No android-actions/setup-android action
+      # 3. Setup Android SDK
       - name: Setup Android SDK
         run: |
-          if [ -z "$ANDROID_HOME" ]; then
-            echo "ANDROID_HOME is not available!"
-            exit 1
-          fi
-
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
 
           echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
 
           echo "Android SDK: $ANDROID_HOME"
 
-          if [ ! -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
-            echo "sdkmanager not found!"
-            find "$ANDROID_HOME/cmdline-tools" -name sdkmanager
-            exit 1
-          fi
-
       # 4. Install SDK Packages
       - name: Install Android SDK Packages
         run: |
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" \
+            -name sdkmanager -type f | head -n 1)
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found!"
+            exit 1
+          fi
 
           yes | "$SDKMANAGER" --licenses || true
 
@@ -76,7 +72,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install gdown
 
-      # 6. Download ZIP from Google Drive
+      # 6. Download Google Drive ZIP
       - name: Download Source ZIP
         env:
           DRIVE_URL: ${{ inputs.google_drive_url }}
@@ -98,53 +94,109 @@ jobs:
             exit 1
           fi
 
-          echo "ZIP downloaded successfully!"
+          echo "Download successful!"
 
-      # 7. Extract Source Code
+      # 7. Extract ZIP
       - name: Extract Source Code
         run: |
           mkdir -p source
+
           unzip -q source.zip -d source
 
-          echo "Source extracted successfully!"
+          echo "ZIP extracted!"
 
-      # 8. Locate Android Project
+          echo "ZIP contents:"
+          find source -maxdepth 3 -type f | head -100
+
+      # 8. Smart Android Project Detection
       - name: Locate Android Project
         run: |
-          mapfile -t GRADLE_FILES < <(
-            find source -type f -name gradlew
-          )
+          echo "Searching Android project..."
 
-          if [ "${#GRADLE_FILES[@]}" -eq 0 ]; then
-            echo "ERROR: gradlew not found!"
-            exit 1
+          PROJECT_DIR=""
+
+          # Find Gradle Wrapper
+          GRADLE_FILE=$(find source \
+            -type f \
+            -name gradlew \
+            -not -path "*/.gradle/*" \
+            | head -n 1)
+
+          if [ -n "$GRADLE_FILE" ]; then
+
+            PROJECT_DIR=$(dirname "$GRADLE_FILE")
+
+            chmod +x "$GRADLE_FILE"
+
+            echo "Gradle Wrapper found!"
+
+          else
+
+            echo "Gradle Wrapper not found."
+
+            # Find settings.gradle
+            SETTINGS_FILE=$(find source \
+              -type f \
+              \( -name settings.gradle -o -name settings.gradle.kts \) \
+              -not -path "*/.gradle/*" \
+              | head -n 1)
+
+            if [ -n "$SETTINGS_FILE" ]; then
+
+              PROJECT_DIR=$(dirname "$SETTINGS_FILE")
+
+            else
+
+              # Find build.gradle
+              BUILD_FILE=$(find source \
+                -type f \
+                \( -name build.gradle -o -name build.gradle.kts \) \
+                -not -path "*/.gradle/*" \
+                | head -n 1)
+
+              if [ -n "$BUILD_FILE" ]; then
+                PROJECT_DIR=$(dirname "$BUILD_FILE")
+              fi
+
+            fi
+
           fi
 
-          if [ "${#GRADLE_FILES[@]}" -gt 1 ]; then
-            echo "Multiple Gradle projects found!"
-            printf '%s\n' "${GRADLE_FILES[@]}"
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Android Gradle project not found!"
             exit 1
           fi
-
-          GRADLE_FILE="${GRADLE_FILES[0]}"
-          PROJECT_DIR=$(dirname "$GRADLE_FILE")
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          chmod +x "$GRADLE_FILE"
-
           echo "Project found: $PROJECT_DIR"
 
-      # 9. Build Debug APK
+      # 9. Setup Gradle
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # 10. Build Debug APK
       - name: Build Debug APK
         run: |
           cd "$PROJECT_DIR"
 
-          ./gradlew assembleDebug \
-            --no-daemon \
-            --stacktrace
+          if [ -f "./gradlew" ]; then
 
-      # 10. Collect APK Files
+            chmod +x ./gradlew
+
+            ./gradlew assembleDebug \
+              --no-daemon \
+              --stacktrace
+
+          else
+
+            gradle assembleDebug \
+              --no-daemon \
+              --stacktrace
+
+          fi
+
+      # 11. Collect APK
       - name: Collect APK Files
         run: |
           mkdir -p output
@@ -156,14 +208,14 @@ jobs:
             -exec cp --parents {} output/ \;
 
           if ! find output -name "*.apk" | grep -q .; then
-            echo "No APK generated!"
+            echo "ERROR: No APK generated!"
             exit 1
           fi
 
           echo "Generated APK files:"
           find output -name "*.apk"
 
-      # 11. Upload APK Artifact
+      # 12. Upload APK Artifact
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -172,16 +224,24 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # 12. Prepare Release Files
+      # 13. Prepare Release
       - name: Prepare Release
         run: |
           mkdir -p release
 
-          find output -type f -name "*.apk" | while read -r apk; do
-            cp "$apk" "release/$(basename "$apk")"
-          done
+          find output \
+            -type f \
+            -name "*.apk" \
+            | while read -r apk; do
 
-      # 13. Create GitHub Release
+              cp "$apk" "release/$(basename "$apk")"
+
+            done
+
+          echo "Release files:"
+          ls -lh release/
+
+      # 14. Create GitHub Release
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -194,8 +254,8 @@ jobs:
             Build Type: Debug APK
             Build System: GitHub Actions
 
-            Download APK from Assets below.
+            Download the APK from Assets below.
           files: release/*.apk
           fail_on_unmatched_files: true
           make_latest: true
-          overwrite_files: true
+
