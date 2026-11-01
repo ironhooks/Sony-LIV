@@ -1,0 +1,179 @@
+
+name: Google Drive APK Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      google_drive_url:
+        description: "Google Drive ZIP file URL"
+        required: true
+        type: string
+
+      release_tag:
+        description: "Release tag"
+        required: true
+        default: "latest-build"
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Download and Build APK
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout Repository
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 2. Setup JDK
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # 3. Setup Android SDK
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 4. Install Android SDK Packages
+      - name: Install SDK Packages
+        run: |
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
+
+      # 5. Install Download Tools
+      - name: Install Download Tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install gdown
+
+      # 6. Download ZIP from Google Drive
+      - name: Download Source ZIP
+        env:
+          DRIVE_URL: ${{ inputs.google_drive_url }}
+        run: |
+          if [ -z "$DRIVE_URL" ]; then
+            echo "Google Drive URL is missing!"
+            exit 1
+          fi
+
+          gdown "$DRIVE_URL" -O source.zip
+
+          if [ ! -s source.zip ]; then
+            echo "ZIP download failed!"
+            exit 1
+          fi
+
+          if ! unzip -tq source.zip; then
+            echo "Invalid ZIP file!"
+            exit 1
+          fi
+
+          echo "Download completed!"
+
+      # 7. Extract ZIP
+      - name: Extract Source Code
+        run: |
+          mkdir -p source
+          unzip -q source.zip -d source
+
+          echo "Source extracted successfully!"
+
+      # 8. Find Android Project
+      - name: Locate Android Project
+        run: |
+          mapfile -t GRADLE_FILES < <(
+            find source -type f -name gradlew
+          )
+
+          if [ "${#GRADLE_FILES[@]}" -eq 0 ]; then
+            echo "ERROR: gradlew not found!"
+            exit 1
+          fi
+
+          if [ "${#GRADLE_FILES[@]}" -gt 1 ]; then
+            echo "Multiple Gradle projects found."
+            printf '%s\n' "${GRADLE_FILES[@]}"
+            echo "Please provide a ZIP containing one Android project."
+            exit 1
+          fi
+
+          GRADLE_FILE="${GRADLE_FILES[0]}"
+          PROJECT_DIR=$(dirname "$GRADLE_FILE")
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          chmod +x "$GRADLE_FILE"
+
+          echo "Project: $PROJECT_DIR"
+
+      # 9. Build APK
+      - name: Build Debug APK
+        run: |
+          cd "$PROJECT_DIR"
+
+          ./gradlew assembleDebug \
+            --no-daemon \
+            --stacktrace
+
+      # 10. Collect APK
+      - name: Collect APK Files
+        run: |
+          mkdir -p output
+
+          find "$PROJECT_DIR" \
+            -type f \
+            -path "*/build/outputs/apk/*" \
+            -name "*.apk" \
+            -exec cp --parents {} output/ \;
+
+          if ! find output -name "*.apk" | grep -q .; then
+            echo "No APK generated!"
+            exit 1
+          fi
+
+          echo "Generated APK files:"
+          find output -name "*.apk"
+
+      # 11. Upload APK Artifact
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-APK
+          path: output/**/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      # 12. Prepare Release Files
+      - name: Prepare Release
+        run: |
+          mkdir -p release
+
+          find output -name "*.apk" -type f | while read -r apk; do
+            cp "$apk" "release/$(basename "$apk")"
+          done
+
+      # 13. Create GitHub Release
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: APK Build ${{ inputs.release_tag }}
+          body: |
+            Automated Android APK Build
+
+            Source: Google Drive ZIP
+            Build Type: Debug
+            Build System: GitHub Actions
+
+            Download the APK from the Assets section below.
+          files: release/*.apk
+          fail_on_unmatched_files: true
+          make_latest: true
+          overwrite_files: true
