@@ -10,7 +10,7 @@ on:
         type: string
 
       release_tag:
-        description: "Release tag"
+        description: "GitHub Release Tag"
         required: true
         default: "latest-build"
         type: string
@@ -47,6 +47,8 @@ jobs:
             "platforms;android-34" \
             "build-tools;34.0.0"
 
+          yes | sdkmanager --licenses
+
       # 5. Install Download Tools
       - name: Install Download Tools
         run: |
@@ -75,7 +77,7 @@ jobs:
             exit 1
           fi
 
-          echo "Download completed!"
+          echo "ZIP downloaded successfully!"
 
       # 7. Extract ZIP
       - name: Extract Source Code
@@ -85,7 +87,7 @@ jobs:
 
           echo "Source extracted successfully!"
 
-      # 8. Find Android Project
+      # 8. Locate Android Project
       - name: Locate Android Project
         run: |
           mapfile -t GRADLE_FILES < <(
@@ -98,9 +100,8 @@ jobs:
           fi
 
           if [ "${#GRADLE_FILES[@]}" -gt 1 ]; then
-            echo "Multiple Gradle projects found."
+            echo "Multiple Gradle projects found!"
             printf '%s\n' "${GRADLE_FILES[@]}"
-            echo "Please provide a ZIP containing one Android project."
             exit 1
           fi
 
@@ -111,9 +112,9 @@ jobs:
 
           chmod +x "$GRADLE_FILE"
 
-          echo "Project: $PROJECT_DIR"
+          echo "Project found: $PROJECT_DIR"
 
-      # 9. Build APK
+      # 9. Build Debug APK
       - name: Build Debug APK
         run: |
           cd "$PROJECT_DIR"
@@ -138,7 +139,7 @@ jobs:
             exit 1
           fi
 
-          echo "Generated APK files:"
+          echo "APK files:"
           find output -name "*.apk"
 
       # 11. Upload APK Artifact
@@ -155,7 +156,7 @@ jobs:
         run: |
           mkdir -p release
 
-          find output -name "*.apk" -type f | while read -r apk; do
+          find output -type f -name "*.apk" | while read -r apk; do
             cp "$apk" "release/$(basename "$apk")"
           done
 
@@ -169,10 +170,10 @@ jobs:
             Automated Android APK Build
 
             Source: Google Drive ZIP
-            Build Type: Debug
+            Build Type: Debug APK
             Build System: GitHub Actions
 
-            Download the APK from the Assets section below.
+            Download APK from Assets below.
           files: release/*.apk
           fail_on_unmatched_files: true
           make_latest: true
