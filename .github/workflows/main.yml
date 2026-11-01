@@ -35,19 +35,40 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # 3. Setup Android SDK
+      # 3. Setup Android SDK Environment
+      # No android-actions/setup-android action
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      # 4. Install Android SDK Packages
-      - name: Install SDK Packages
         run: |
-          sdkmanager --install \
+          if [ -z "$ANDROID_HOME" ]; then
+            echo "ANDROID_HOME is not available!"
+            exit 1
+          fi
+
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+
+          echo "Android SDK: $ANDROID_HOME"
+
+          if [ ! -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            echo "sdkmanager not found!"
+            find "$ANDROID_HOME/cmdline-tools" -name sdkmanager
+            exit 1
+          fi
+
+      # 4. Install SDK Packages
+      - name: Install Android SDK Packages
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+          yes | "$SDKMANAGER" --licenses || true
+
+          "$SDKMANAGER" --install \
             "platform-tools" \
             "platforms;android-34" \
             "build-tools;34.0.0"
 
-          yes | sdkmanager --licenses
+          yes | "$SDKMANAGER" --licenses
 
       # 5. Install Download Tools
       - name: Install Download Tools
@@ -79,7 +100,7 @@ jobs:
 
           echo "ZIP downloaded successfully!"
 
-      # 7. Extract ZIP
+      # 7. Extract Source Code
       - name: Extract Source Code
         run: |
           mkdir -p source
@@ -123,7 +144,7 @@ jobs:
             --no-daemon \
             --stacktrace
 
-      # 10. Collect APK
+      # 10. Collect APK Files
       - name: Collect APK Files
         run: |
           mkdir -p output
@@ -139,7 +160,7 @@ jobs:
             exit 1
           fi
 
-          echo "APK files:"
+          echo "Generated APK files:"
           find output -name "*.apk"
 
       # 11. Upload APK Artifact
