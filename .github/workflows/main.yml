@@ -1,27 +1,18 @@
 
-name: ZooPLAY APK Builder
+name: Google Drive APK Builder
 
 on:
   workflow_dispatch:
-    inputs:
-      drive_url:
-        description: "Google Drive ZIP file link"
-        required: true
-        type: string
-
-permissions:
-  contents: read
 
 jobs:
   build:
-    name: Download, Extract & Build APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup JDK 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -30,76 +21,55 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK
-        run: |
-          sdkmanager --install \
-            "platform-tools" \
-            "platforms;android-35" \
-            "platforms;android-36" \
-            "build-tools;35.0.0" \
-            "build-tools;36.0.0"
+      - name: Install Download Tool
+        run: pip install gdown
 
       - name: Download Source ZIP
         env:
-          DRIVE_URL: ${{ inputs.drive_url }}
+          FILE_ID: ${{ secrets.GDRIVE_FILE_ID }}
         run: |
-          if [ -z "$DRIVE_URL" ]; then
-            echo "Google Drive link is missing!"
+          gdown --id "$FILE_ID" -O source.zip
+
+      - name: Extract Source
+        run: |
+          mkdir -p source
+          unzip -q source.zip -d source
+
+      - name: Find Android Project
+        run: |
+          GRADLE_FILE=$(find source -name gradlew -type f | head -n 1)
+
+          if [ -z "$GRADLE_FILE" ]; then
+            echo "Gradle project not found!"
             exit 1
           fi
 
-          pip install --no-cache-dir gdown
+          PROJECT_DIR=$(dirname "$GRADLE_FILE")
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
 
-          gdown "$DRIVE_URL" \
-            -O "$RUNNER_TEMP/zooplay-source.zip"
+          chmod +x "$GRADLE_FILE"
 
-          test -s "$RUNNER_TEMP/zooplay-source.zip"
-
-      - name: Extract Source ZIP
+      - name: Build APK
         run: |
-          mkdir -p "$RUNNER_TEMP/zooplay-source"
-
-          unzip -q "$RUNNER_TEMP/zooplay-source.zip" \
-            -d "$RUNNER_TEMP/zooplay-source"
-
-      - name: Locate Android Project
-        id: locate
-        run: |
-          GRADLEW=$(find "$RUNNER_TEMP/zooplay-source" \
-            -type f -name gradlew -print -quit)
-
-          if [ -z "$GRADLEW" ]; then
-            echo "ERROR: gradlew not found!"
-            exit 1
-          fi
-
-          PROJECT_DIR=$(dirname "$GRADLEW")
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Build Debug APK
-        working-directory: ${{ steps.locate.outputs.project_dir }}
-        run: |
-          chmod +x gradlew
-          ./gradlew --no-daemon assembleDebug
+          cd "$PROJECT_DIR"
+          ./gradlew assembleDebug --no-daemon
 
       - name: Collect APK
-        if: success()
         run: |
-          mkdir -p "$RUNNER_TEMP/zooplay-apk"
+          mkdir -p output
+          find "$PROJECT_DIR" \
+            -path "*/build/outputs/apk/*" \
+            -name "*.apk" \
+            -exec cp {} output/ \;
 
-          find "${{ steps.locate.outputs.project_dir }}" \
-            -type f -path "*/build/outputs/apk/*/*.apk" \
-            -exec cp {} "$RUNNER_TEMP/zooplay-apk/" \;
-
-          test -n "$(ls -A "$RUNNER_TEMP/zooplay-apk")"
+          if [ -z "$(ls -A output)" ]; then
+            echo "APK not generated!"
+            exit 1
+          fi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ZooPLAY-APK
-          path: ${{ runner.temp }}/zooplay-apk/*.apk
-          if-no-files-found: error
-          retention-days: 14
+          name: Android-APK
+          path: output/*.apk
+          retention-days: 30
