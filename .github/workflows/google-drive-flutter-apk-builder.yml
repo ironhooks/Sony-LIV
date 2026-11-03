@@ -31,12 +31,28 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # Flutter 3.35.7 supports the Dart SDK constraint in this project.
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.24.5"
+          flutter-version: "3.35.7"
           channel: stable
           cache: true
+
+      - name: Install Android SDK 36
+        run: |
+          set -euo pipefail
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n 1)
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found."
+            exit 1
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
 
       - name: Install Download Tools
         run: |
@@ -48,19 +64,12 @@ jobs:
           DRIVE_URL: ${{ inputs.google_drive_url }}
         run: |
           set -euo pipefail
-
           if [ -z "$DRIVE_URL" ]; then
             echo "ERROR: Google Drive URL is missing."
             exit 1
           fi
-
           gdown "$DRIVE_URL" -O source.zip
-
-          if [ ! -s source.zip ]; then
-            echo "ERROR: ZIP download failed."
-            exit 1
-          fi
-
+          test -s source.zip
           unzip -tq source.zip
           echo "Flutter source ZIP downloaded successfully."
 
@@ -69,14 +78,12 @@ jobs:
           set -euo pipefail
           mkdir -p source
           unzip -q source.zip -d source
-
           echo "ZIP contents:"
           find source -maxdepth 4 -type f | head -100
 
       - name: Locate Flutter Project
         run: |
           set -euo pipefail
-
           PUBSPEC=$(find source -type f -name pubspec.yaml \
             -not -path '*/.dart_tool/*' | head -n 1)
 
@@ -86,7 +93,6 @@ jobs:
           fi
 
           PROJECT_DIR=$(dirname "$PUBSPEC")
-
           if [ ! -f "$PROJECT_DIR/lib/main.dart" ]; then
             echo "ERROR: Flutter project found, but lib/main.dart is missing."
             exit 1
@@ -95,13 +101,11 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "Flutter project found: $PROJECT_DIR"
 
-      - name: Prepare Android Project
+      - name: Generate Android Project
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
 
-          # This source ZIP may not contain generated Android platform files.
-          # Its setup.sh creates android/ and installs the TV manifest.
           if [ ! -d android ]; then
             if [ ! -f setup.sh ]; then
               echo "ERROR: android/ and setup.sh are both missing."
@@ -113,14 +117,75 @@ jobs:
             flutter pub get
           fi
 
-          if [ ! -f android/app/src/main/AndroidManifest.xml ]; then
-            echo "ERROR: AndroidManifest.xml was not generated."
-            exit 1
-          fi
+          test -f android/settings.gradle || test -f android/settings.gradle.kts
+          test -f android/app/src/main/AndroidManifest.xml
 
-          echo "Android project is ready."
+      # screen_brightness_android 2.1.6 uses the Kotlin compilerOptions DSL.
+      # Upgrade the generated Android Gradle plugin versions and compile SDK.
+      - name: Fix Android Gradle and Kotlin Compatibility
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
 
-      - name: Verify Flutter Environment
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          settings_candidates = [
+              Path("android/settings.gradle"),
+              Path("android/settings.gradle.kts"),
+          ]
+          settings = next((p for p in settings_candidates if p.exists()), None)
+          if settings is None:
+              raise SystemExit("ERROR: Android settings.gradle not found.")
+
+          content = settings.read_text()
+          content, agp_count = re.subn(
+              r'(id\s*\(?["\']com\.android\.application["\']\)?\s+version\s+["\'])[^"\']+(["\'])',
+              r'\g<1>8.10.1\2', content
+          )
+          content, kotlin_count = re.subn(
+              r'(id\s*\(?["\']org\.jetbrains\.kotlin\.android["\']\)?\s+version\s+["\'])[^"\']+(["\'])',
+              r'\g<1>2.1.0\2', content
+          )
+          if agp_count == 0 or kotlin_count == 0:
+              raise SystemExit(
+                  "ERROR: Could not update AGP/Kotlin plugin versions in " + str(settings)
+              )
+          settings.write_text(content)
+
+          wrapper = Path("android/gradle/wrapper/gradle-wrapper.properties")
+          if not wrapper.exists():
+              raise SystemExit("ERROR: Gradle wrapper properties not found.")
+          wrapper_text = wrapper.read_text()
+          wrapper_text, count = re.subn(
+              r'gradle-[0-9.]+-(?:all|bin)\.zip',
+              'gradle-8.11.1-all.zip',
+              wrapper_text
+          )
+          if count == 0:
+              raise SystemExit("ERROR: Could not update Gradle wrapper URL.")
+          wrapper.write_text(wrapper_text)
+
+          app_gradle = Path("android/app/build.gradle")
+          app_gradle_kts = Path("android/app/build.gradle.kts")
+          app_file = app_gradle if app_gradle.exists() else app_gradle_kts
+          if not app_file.exists():
+              raise SystemExit("ERROR: Android app Gradle file not found.")
+          app_text = app_file.read_text()
+          app_text, count = re.subn(
+              r'compileSdk(?:Version)?\s*(?:=\s*)?flutter\.compileSdkVersion',
+              'compileSdk 36' if app_file.suffix == ".gradle" else 'compileSdk = 36',
+              app_text
+          )
+          if count == 0:
+              raise SystemExit("ERROR: Could not set compileSdk to 36.")
+          app_file.write_text(app_text)
+
+          print("Updated AGP 8.10.1, Kotlin 2.1.0, Gradle 8.11.1 and compileSdk 36.")
+          PY
+
+      - name: Verify Flutter and Resolve Dependencies
         run: |
           flutter --version
           flutter doctor -v
@@ -138,7 +203,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p output
-
           find "$PROJECT_DIR/build/app/outputs/flutter-apk" \
             -maxdepth 1 -type f -name "*.apk" \
             -exec cp {} output/ \;
@@ -147,8 +211,6 @@ jobs:
             echo "ERROR: No Flutter APK was generated."
             exit 1
           fi
-
-          echo "Generated APK:"
           ls -lh output/
 
       - name: Upload APK Artifact
@@ -170,6 +232,7 @@ jobs:
             Source: Google Drive ZIP
             Build type: Release APK
             Target platforms: Android ARMv7 and ARM64
+            Android compile SDK: 36
             Build system: GitHub Actions
           files: output/*.apk
           fail_on_unmatched_files: true
