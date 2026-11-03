@@ -185,6 +185,43 @@ jobs:
           print("Updated AGP 8.10.1, Kotlin 2.1.0, Gradle 8.11.1 and compileSdk 36.")
           PY
 
+
+      - name: Add R8 Missing Annotation Dependencies
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          if [ -f android/app/build.gradle.kts ]; then
+            APP_GRADLE="android/app/build.gradle.kts"
+            if ! grep -q "com.google.errorprone:error_prone_annotations" "$APP_GRADLE"; then
+              cat >> "$APP_GRADLE" <<'EOF'
+
+          // Supplies annotation classes referenced by Google Tink during R8 shrinking.
+          dependencies {
+              implementation("com.google.errorprone:error_prone_annotations:2.36.0")
+              implementation("com.google.code.findbugs:jsr305:3.0.2")
+          }
+          EOF
+            fi
+          elif [ -f android/app/build.gradle ]; then
+            APP_GRADLE="android/app/build.gradle"
+            if ! grep -q "com.google.errorprone:error_prone_annotations" "$APP_GRADLE"; then
+              cat >> "$APP_GRADLE" <<'EOF'
+
+          // Supplies annotation classes referenced by Google Tink during R8 shrinking.
+          dependencies {
+              implementation 'com.google.errorprone:error_prone_annotations:2.36.0'
+              implementation 'com.google.code.findbugs:jsr305:3.0.2'
+          }
+          EOF
+            fi
+          else
+            echo "ERROR: Android app Gradle file not found."
+            exit 1
+          fi
+
+          echo "R8 annotation dependencies configured in $APP_GRADLE"
+
       - name: Verify Flutter and Resolve Dependencies
         run: |
           flutter --version
@@ -233,6 +270,7 @@ jobs:
             Build type: Release APK
             Target platforms: Android ARMv7 and ARM64
             Android compile SDK: 36
+            R8 annotation dependencies: error_prone_annotations + jsr305
             Build system: GitHub Actions
           files: output/*.apk
           fail_on_unmatched_files: true
